@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Backrooms Simulator</title>
+<style>
+  body{margin:0;background:#000;color:#fff;font-family:sans-serif;overflow:hidden}
+  canvas{display:block;margin:0 auto;background:#000;}
+  #ui{position:fixed;top:10px;left:10px;z-index:20;}
+  button{margin:4px;padding:6px 12px;border:none;border-radius:6px;background:#222;color:#fff;cursor:pointer;}
+  #menu{position:absolute;top:0;left:0;right:0;bottom:0;display:flex;flex-direction:column;justify-content:center;align-items:center;background:#000;z-index:50;}
+  #menu h1{font-size:32px;margin-bottom:20px;}
+  #staminaBar{position:fixed;bottom:10px;left:50%;transform:translateX(-50%);width:200px;height:20px;background:#333;border-radius:10px;overflow:hidden;z-index:30;}
+  #staminaFill{height:100%;background:#0f0;width:100%;}
+  #minimapCircle{position:fixed;top:20px;right:20px;width:160px;height:160px;border-radius:50%;overflow:hidden;background:rgba(0,0,0,0.6);z-index:25;}
+  #minimapCanvas{width:100%;height:100%;}
+</style>
+</head>
+<body>
+<div id="ui">
+  <button id="fullscreen">Toggle Fullscreen (V)</button>
+  <button id="flash">Toggle Flashlight (F)</button>
+  <button id="save">Save</button>
+  <button id="load">Load</button>
+  <button id="map">Toggle Map (M)</button>
+  <button id="settings">Settings</button>
+</div>
+<div id="menu">
+  <h1>Backrooms Simulator</h1>
+  <label>Seed: <input id="seed" type="text" value="backrooms" /></label>
+  <button id="start">Start</button>
+</div>
+<div id="settingsMenu" style="display:none;position:absolute;top:0;left:0;right:0;bottom:0;background:#000;z-index:60;flex-direction:column;justify-content:center;align-items:center;color:#fff;">
+  <h2>Settings</h2>
+  <label>FOV: <input id="fov" type="range" min="30" max="120" value="60"></label><br>
+  <label>Volume: <input id="volume" type="range" min="0" max="1" step="0.01" value="0.3"></label><br>
+  <h3>Keybinds</h3>
+  <p>Click input fields to change keys</p>
+  <label>Forward: <input id="keyForward" type="text" value="w" size="2"></label>
+  <label>Backward: <input id="keyBackward" type="text" value="s" size="2"></label>
+  <label>Left: <input id="keyLeft" type="text" value="a" size="2"></label>
+  <label>Right: <input id="keyRight" type="text" value="d" size="2"></label>
+  <label>Sprint: <input id="keySprint" type="text" value="shift" size="5"></label>
+  <label>Crouch: <input id="keyCrouch" type="text" value="control" size="7"></label><br>
+  <button id="closeSettings">Close</button>
+</div>
+<div id="staminaBar"><div id="staminaFill"></div></div>
+<div id="minimapCircle" style="display:none"><canvas id="minimapCanvas" width="160" height="160"></canvas></div>
+<canvas id="game" width="960" height="540"></canvas>
+<script>
+const canvas=document.getElementById('game');
+const ctx=canvas.getContext('2d');
+const W=canvas.width,H=canvas.height;
+let showMenu=true;
+let seedStr="backrooms";
+let flashlightOn=true;
+let showMap=false;
+let fovDeg=60;
+let volume=0.3;
+
+// --- keybinds ---
+let keybinds={forward:'w',backward:'s',left:'a',right:'d',sprint:'shift',crouch:'control'};
+function setKeybind(inputId,action){document.getElementById(inputId).addEventListener('keydown',e=>{e.preventDefault();keybinds[action]=e.key.toLowerCase();document.getElementById(inputId).value=keybinds[action];});}
+setKeybind('keyForward','forward');
+setKeybind('keyBackward','backward');
+setKeybind('keyLeft','left');
+setKeybind('keyRight','right');
+setKeybind('keySprint','sprint');
+setKeybind('keyCrouch','crouch');
+
+// --- stamina system ---
+let stamina=1; // 0 to 1
+let crouching=false;
+let sprinting=false;
+
+// --- ambient sounds ---
+let audioCtx=null;let humGain=null;function initAudio(){if(audioCtx)return;audioCtx=new (window.AudioContext||window.webkitAudioContext)();const osc=audioCtx.createOscillator();humGain=audioCtx.createGain();osc.type='sawtooth';osc.frequency.value=50;humGain.gain.value=volume*0.005;osc.connect(humGain).connect(audioCtx.destination);osc.start();setInterval(()=>{if(Math.random()<0.02){const click=audioCtx.createOscillator();click.frequency.value=200+Math.random()*200;const g=audioCtx.createGain();g.gain.setValueAtTime(volume*0.05,audioCtx.currentTime);g.gain.exponentialRampToValueAtTime(0.001,audioCtx.currentTime+0.5);click.connect(g).connect(audioCtx.destination);click.start();click.stop(audioCtx.currentTime+0.5);}},7000);}
+
+// --- seedable RNG ---
+function mulberry32(a){return function(){var t=a+=0x6D2B79F5;t=Math.imul(t^t>>>15,t|1);t^=t+Math.imul(t^t>>>7,t|61);return((t^t>>>14)>>>0)/4294967296}}
+function str2seed(str){let h=1779033703^str.length;for(let i=0;i<str.length;i++){h=Math.imul(h^str.charCodeAt(i),3432918353);h=h<<13|h>>>19;}return function(){h=Math.imul(h^h>>>16,2246822507);h=Math.imul(h^h>>>13,3266489909);h^=h>>>16;return h>>>0;}( )}
+
+let rand=mulberry32(1234);
+function reseed(str){rand=mulberry32(str2seed(str));}
+
+// --- map system ---
+const TILE=64;
+const MAP_W=32,MAP_H=32;
+let MAP=[];
+function generateMaze(){MAP=new Array(MAP_W*MAP_H).fill(1);
+  const carve=(x,y)=>{const dirs=[[1,0],[-1,0],[0,1],[0,-1]].sort(()=>rand()-0.5);for(const [dx,dy] of dirs){const nx=x+dx*2,ny=y+dy*2;if(nx>0&&ny>0&&nx<MAP_W-1&&ny<MAP_H-1&&MAP[ny*MAP_W+nx]===1){MAP[ny*MAP_W+nx]=0;MAP[(y+dy)*MAP_W+(x+dx)]=0;carve(nx,ny);}}};MAP[1*MAP_W+1]=0;carve(1,1);
+  for(let y=0;y<5;y++)for(let x=0;x<5;x++){MAP[(2+y)*MAP_W+(2+x)]=0;}
+  for(let i=0;i<10;i++){let rx=Math.floor(rand()*(MAP_W-4))+2;let ry=Math.floor(rand()*(MAP_H-4))+2;MAP[ry*MAP_W+rx]=2;}
+}
+
+// --- player ---
+let player={x:3.5*TILE,y:3.5*TILE,ang:0,bob:0};
+let NUM_RAYS=240;
+const MAX_DEPTH=2000;
+
+// --- input ---
+const keys={};
+window.addEventListener('keydown',e=>{keys[e.key.toLowerCase()]=true;if(e.key==='f'){flashlightOn=!flashlightOn;}if(e.key==='v')toggleFullscreen();if(e.key==='m'){showMap=!showMap;document.getElementById('minimapCircle').style.display=showMap?'block':'none';}if(e.key==='escape'){document.exitPointerLock();}});
+window.addEventListener('keyup',e=>{keys[e.key.toLowerCase()]=false;});
+canvas.requestPointerLock=canvas.requestPointerLock||canvas.mozRequestPointerLock;
+canvas.onclick=()=>{if(!showMenu){canvas.requestPointerLock();initAudio();}};
+let mouseDX=0;
+function pointerMove(e){mouseDX+=e.movementX;}
+document.addEventListener('pointerlockchange',()=>{if(document.pointerLockElement===canvas)document.addEventListener('mousemove',pointerMove);else document.removeEventListener('mousemove',pointerMove);});
+
+// --- save/load ---
+function saveGame(){localStorage.setItem('backrooms_save',JSON.stringify({x:player.x,y:player.y,ang:player.ang,seed:seedStr}));}
+function loadGame(){const s=localStorage.getItem('backrooms_save');if(s){const d=JSON.parse(s);player.x=d.x;player.y=d.y;player.ang=d.ang;seedStr=d.seed;reseed(seedStr);generateMaze();}}
+
+// --- utils ---
+function mapAt(mx,my){if(mx<0||my<0||mx>=MAP_W||my>=MAP_H)return 1;return MAP[my*MAP_W+mx];}
+function collide(x,y,r){const mx=Math.floor(x/TILE),my=Math.floor(y/TILE);if(mapAt(mx,my)===1)return true;return false;}
+
+// --- update ---
+function update(dt){
+  sprinting=keys[keybinds.sprint];
+  crouching=keys[keybinds.crouch];
+  player.ang+=mouseDX*0.003;mouseDX=0;
+  let mv=0;if(keys[keybinds.forward])mv+=1;if(keys[keybinds.backward])mv-=1;
+  let strafe=0;if(keys[keybinds.left])strafe-=1;if(keys[keybinds.right])strafe+=1;
+  let baseSpd=120;
+  if(sprinting && stamina>0){baseSpd=200;stamina=Math.max(0,stamina-dt*0.3);} else if(crouching){baseSpd=70;stamina=Math.min(1,stamina+dt*0.2);} else {stamina=Math.min(1,stamina+dt*0.1);} 
+  const nx=player.x+(Math.cos(player.ang)*mv*baseSpd-Math.sin(player.ang)*strafe*baseSpd*0.75)*dt;
+  const ny=player.y+(Math.sin(player.ang)*mv*baseSpd+Math.cos(player.ang)*strafe*baseSpd*0.75)*dt;
+  if(!collide(nx,player.y,14))player.x=nx;if(!collide(player.x,ny,14))player.y=ny;
+  if(mv!==0||strafe!==0)player.bob+=dt*6;else player.bob=0;
+  document.getElementById('staminaFill').style.width=(stamina*100)+"%";
+  document.getElementById('staminaFill').style.background= stamina>0.3? '#0f0':'#f00';
+}
+
+// --- render ---
+function render(){ctx.clearRect(0,0,W,H);const halfH=H/2;ctx.fillStyle='#e0d060';ctx.fillRect(0,0,W,halfH);ctx.fillStyle='#111';ctx.fillRect(0,halfH,W,halfH);
+  const FOV=(fovDeg*Math.PI/180);
+  for(let r=0;r<NUM_RAYS;r++){const rayScreenPos=(r/NUM_RAYS-0.5)*FOV;const rayAng=player.ang+rayScreenPos;let dist=0;let hit=false;let hx=0,hy=0;let cell=1;while(!hit&&dist<MAX_DEPTH){dist+=6;hx=player.x+Math.cos(rayAng)*dist;hy=player.y+Math.sin(rayAng)*dist;const mx=Math.floor(hx/TILE),my=Math.floor(hy/TILE);cell=mapAt(mx,my);if(cell===1||cell===2)hit=true;}const corr=dist*Math.cos(rayScreenPos);const wallH=(TILE*700)/corr;const x=Math.floor(r*(W/NUM_RAYS));const shade=Math.max(0.1,1-corr/900);ctx.fillStyle=`rgba(${255*shade},${255*shade*0.95},${100*shade},1)`;const bob=Math.sin(player.bob*8)*4;ctx.fillRect(x,halfH-wallH/2+bob,Math.ceil(W/NUM_RAYS)+1,wallH);
+    if(cell===2){ctx.fillStyle='rgba(120,80,50,1)';ctx.fillRect(x,halfH-wallH/4+bob,Math.ceil(W/NUM_RAYS)+1,wallH/4);}  }
+  if(flashlightOn){const grad=ctx.createRadialGradient(W/2,H/2,100,W/2,H/2,H/1.1);grad.addColorStop(0,'rgba(255,255,255,0)');grad.addColorStop(0.7,'rgba(0,0,0,0.6)');grad.addColorStop(1,'rgba(0,0,0,0.95)');ctx.fillStyle=grad;ctx.fillRect(0,0,W,H);}  
+  ctx.fillStyle='rgba(255,255,255,0.15)';ctx.fillRect(0,0,W,H);
+  ctx.shadowColor='rgba(0,0,0,0.8)';ctx.shadowBlur=20;
+  ctx.fillStyle='#bbb';ctx.beginPath();ctx.moveTo(W/2+40,H-80);ctx.lineTo(W/2+70,H-150);ctx.lineTo(W/2+100,H-80);ctx.closePath();ctx.fill();
+
+  // minimap render
+  if(showMap){const mm=document.getElementById('minimapCanvas').getContext('2d');mm.clearRect(0,0,160,160);mm.save();mm.translate(80,80);mm.scale(2,2);
+    mm.fillStyle='white';mm.beginPath();mm.arc(0,0,2,0,Math.PI*2);mm.fill();
+    for(let y=-10;y<=10;y++)for(let x=-10;x<=10;x++){const mx=Math.floor(player.x/TILE)+x;const my=Math.floor(player.y/TILE)+y;const cell=mapAt(mx,my);if(cell===1){mm.fillStyle='yellow';mm.fillRect(x*3,y*3,3,3);} }
+    mm.restore();}
+}
+
+// --- loop ---
+let last=performance.now();
+function loop(now){const dt=Math.min(0.05,(now-last)/1000);if(!showMenu){update(dt);render();}last=now;requestAnimationFrame(loop);}requestAnimationFrame(loop);
+
+// --- menu ---
+const menu=document.getElementById('menu');
+document.getElementById('start').onclick=()=>{seedStr=document.getElementById('seed').value;reseed(seedStr);generateMaze();showMenu=false;menu.style.display='none';canvas.requestPointerLock();initAudio();};
+document.getElementById('fullscreen').onclick=toggleFullscreen;
+document.getElementById('flash').onclick=()=>{flashlightOn=!flashlightOn;};
+document.getElementById('save').onclick=saveGame;
+document.getElementById('load').onclick=loadGame;
+document.getElementById('map').onclick=()=>{showMap=!showMap;document.getElementById('minimapCircle').style.display=showMap?'block':'none';};
+document.getElementById('settings').onclick=()=>{document.getElementById('settingsMenu').style.display='flex';};
+document.getElementById('closeSettings').onclick=()=>{document.getElementById('settingsMenu').style.display='none';};
+document.getElementById('fov').oninput=e=>{fovDeg=e.target.value;};
+document.getElementById('volume').oninput=e=>{volume=parseFloat(e.target.value);if(humGain)humGain.gain.value=volume*0.005;};
+
+// --- fullscreen ---
+function toggleFullscreen(){if(!document.fullscreenElement){canvas.requestFullscreen();}else{document.exitFullscreen();}}
+</script>
+</body>
+</html>
